@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>デジタルサイネージ</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; background:#000; overflow:hidden; }
+
+  #stage { position:absolute; inset:0; }
+  .item {
+    position:absolute; inset:0;
+    width:100%; height:100%;
+    object-fit: contain;
+    opacity:0; transition:opacity .8s ease-in-out;
+  }
+  .item.active { opacity:1; }
+
+  #clock {
+    position:absolute; right:24px; bottom:20px;
+    font:600 26px/1 "Meiryo UI",sans-serif; color:#fff;
+    text-shadow:0 2px 8px rgba(0,0,0,.85); z-index:20;
+  }
+
+  #bar {
+    position:absolute; left:0; bottom:0; height:4px;
+    background:#FFB300; width:0; z-index:20;
+    box-shadow:0 0 8px rgba(255,179,0,.6);
+  }
+
+  #notice {
+    position:absolute; inset:0; z-index:30;
+    display:flex; flex-direction:column;
+    justify-content:center; align-items:center;
+    background:linear-gradient(135deg,#1432AA 0%,#0E2480 100%);
+    color:#fff; font-family:"Meiryo UI",sans-serif;
+    transition:opacity .6s; text-align:center; padding:2rem;
+  }
+  #notice.hide { opacity:0; pointer-events:none; }
+  #notice h1 { font-size:2rem; margin-bottom:.6rem; }
+  #notice p  { font-size:1rem; color:#FFF6DE; }
+
+  /* 全画面誘導バナー(ChromeOS Flex手動起動用) */
+  #fstip {
+    position:absolute; left:0; right:0; top:0; z-index:40;
+    background:#FFB300; color:#1A1A1A;
+    font:600 14px/1 "Meiryo UI",sans-serif;
+    padding:10px; text-align:center;
+    transition:opacity .5s, transform .5s;
+  }
+  #fstip.hide { opacity:0; transform:translateY(-100%); pointer-events:none; }
+
+  #dbg {
+    position:absolute; left:16px; top:16px; z-index:25;
+    font:500 13px/1.6 monospace; color:#0f0;
+    background:rgba(0,0,0,.65); padding:8px 12px; border-radius:6px;
+    display:none; white-space:pre;
+  }
+  #dbg.on { display:block; }
+</style>
+</head>
+<body>
+
+<div id="fstip">F11キーで全画面表示にしてください（フルスクリーン推奨）</div>
+<div id="stage"></div>
+<div id="bar"></div>
+<div id="clock"></div>
+<div id="dbg"></div>
+
+<div id="notice">
+  <h1>光井企画工学事務所</h1>
+  <p>デジタルサイネージを起動しています…</p>
+</div>
+
+<script>
+/* ============================================================
+   超局所IoTデジタルサイネージ / ライトプラン(ChromeOS Flex手動起動版)
+   光井企画工学事務所
+   ============================================================ */
+
+const CONFIG = {
+  mode: 'sequential',      // 'sequential'(指定順) / 'shuffle'(お任せ) / 'weighted'(重み付き)
+  defaultDuration: 12,
+  fadeMs: 800,
+  showClock: true,
+  showBar: true,
+  reloadHours: 6,
+
+  playlist: [
+    { id:'ad01', type:'image', src:'media/ad01.jpg', duration:12, weight:1 },
+    { id:'promo', type:'video', src:'media/promo.mp4', weight:1 },
+    { id:'ad02', type:'image', src:'media/ad02.jpg', duration:12, weight:1 },
+    { id:'mpe',  type:'image', src:'media/mpe_intro.jpg', duration:10, weight:1 }
+  ]
+};
+
+const qs = new URLSearchParams(location.search);
+if (qs.has('mode'))     CONFIG.mode = qs.get('mode');
+if (qs.has('duration')) CONFIG.defaultDuration = Number(qs.get('duration')) || CONFIG.defaultDuration;
+if (qs.get('clock') === '0') CONFIG.showClock = false;
+if (qs.get('bar')   === '0') CONFIG.showBar   = false;
+const DEBUG = qs.get('debug') === '1';
+const SITE  = qs.get('site') || 'default';
+
+function inHours(spec){
+  if (!spec) return true;
+  const [s, e] = spec.split('-').map(Number);
+  const h = new Date().getHours();
+  return s <= e ? (h >= s && h < e) : (h >= s || h < e);
+}
+function activeList(){
+  const list = CONFIG.playlist.filter(it => inHours(it.hours));
+  return list.length ? list : CONFIG.playlist;
+}
+
+let queue = [], lastId = null;
+
+function shuffle(a){
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function buildQueue(){
+  const list = activeList();
+  if (CONFIG.mode === 'sequential') { queue = [...list]; return; }
+  if (CONFIG.mode === 'weighted') {
+    const bag = [];
+    list.forEach(it => { const w = Math.max(1, it.weight || 1); for (let i=0;i<w;i++) bag.push(it); });
+    queue = shuffle(bag);
+  } else {
+    queue = shuffle([...list]);
+  }
+  if (queue.length > 1 && lastId && queue[0].id === lastId) {
+    [queue[0], queue[1]] = [queue[1], queue[0]];
+  }
+}
+
+function nextItem(){
+  if (!queue.length) buildQueue();
+  const it = queue.shift();
+  lastId = it.id;
+  return it;
+}
+
+const stage  = document.getElementById('stage');
+const bar    = document.getElementById('bar');
+const notice = document.getElementById('notice');
+let current = null, timer = null, barAnim = null, errStreak = 0;
+
+function makeEl(item){
+  if (item.type === 'video') {
+    const v = document.createElement('video');
+    v.className = 'item';
+    v.src = item.src;
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = 'auto';
+    return v;
+  }
+  const img = document.createElement('img');
+  img.className = 'item';
+  img.src = item.src;
+  return img;
+}
+
+function runBar(ms){
+  if (!CONFIG.showBar) return;
+  if (barAnim) barAnim.cancel();
+  bar.style.width = '0';
+  barAnim = bar.animate([{width:'0%'},{width:'100%'}], { duration: ms, easing:'linear', fill:'forwards' });
+}
+
+function play(){
+  clearTimeout(timer);
+  const item = nextItem();
+  const el = makeEl(item);
+  stage.appendChild(el);
+
+  const fail = () => {
+    errStreak++;
+    dbg(`ERROR: ${item.src}`);
+    if (errStreak > activeList().length) { setTimeout(()=> location.reload(), 30000); return; }
+    timer = setTimeout(play, 1500);
+  };
+  el.onerror = fail;
+
+  requestAnimationFrame(()=> el.classList.add('active'));
+
+  const old = current;
+  current = el;
+  if (old) {
+    old.classList.remove('active');
+    setTimeout(()=>{ if (old.pause) old.pause(); old.remove(); }, CONFIG.fadeMs + 100);
+  }
+
+  notice.classList.add('hide');
+
+  if (item.type === 'video') {
+    el.onloadedmetadata = () => runBar(el.duration * 1000);
+    el.onended = () => { errStreak = 0; play(); };
+    el.play().then(()=> { errStreak = 0; }).catch(fail);
+  } else {
+    const ms = (item.duration || CONFIG.defaultDuration) * 1000;
+    el.onload = () => { errStreak = 0; runBar(ms); };
+    timer = setTimeout(play, ms);
+  }
+
+  dbg(`mode: ${CONFIG.mode}\nsite: ${SITE}\nnow : ${item.id} (${item.type})\nnext: ${queue.length ? queue[0].id : '(reshuffle)'}\nqueue: ${queue.length}`);
+}
+
+if (CONFIG.showClock) {
+  const clock = document.getElementById('clock');
+  const tick = () => {
+    clock.textContent = new Date().toLocaleString('ja-JP', {
+      month:'numeric', day:'numeric', weekday:'short', hour:'2-digit', minute:'2-digit'
+    });
+  };
+  setInterval(tick, 1000); tick();
+} else {
+  document.getElementById('clock').style.display = 'none';
+}
+
+const dbgEl = document.getElementById('dbg');
+if (DEBUG) dbgEl.classList.add('on');
+function dbg(t){ if (DEBUG) dbgEl.textContent = t; }
+
+setTimeout(()=> location.reload(), CONFIG.reloadHours * 3600 * 1000);
+
+let lastHour = new Date().getHours();
+setInterval(()=>{
+  const h = new Date().getHours();
+  if (h !== lastHour) { lastHour = h; queue = []; dbg('hour changed → rebuild'); }
+}, 60000);
+
+/* ---------- 全画面誘導バナー：全画面時は自動非表示 ---------- */
+function checkFullscreen(){
+  const tip = document.getElementById('fstip');
+  if (document.fullscreenElement) {
+    tip.classList.add('hide');
+  } else {
+    tip.classList.remove('hide');
+  }
+}
+document.addEventListener('fullscreenchange', checkFullscreen);
+document.addEventListener('click', () => {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen().catch(()=>{});
+  }
+});
+setTimeout(checkFullscreen, 500);
+// 15秒経っても全画面でなければバナーを再表示し続ける（自動では消さない）
+
+setTimeout(play, 1200);
+</script>
+</body>
+</html>
