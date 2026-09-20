@@ -41,7 +41,6 @@
   #notice h1 { font-size:2rem; margin-bottom:.6rem; }
   #notice p  { font-size:1rem; color:#FFF6DE; }
 
-  /* 全画面誘導バナー(ChromeOS Flex手動起動用) */
   #fstip {
     position:absolute; left:0; right:0; top:0; z-index:40;
     background:#FFB300; color:#1A1A1A;
@@ -75,24 +74,24 @@
 
 <script>
 /* ============================================================
-   超局所IoTデジタルサイネージ / ライトプラン(ChromeOS Flex手動起動版)
+   超局所IoTデジタルサイネージ / ライトプラン
+   media フォルダ自動読み込み版
    光井企画工学事務所
    ============================================================ */
 
+// ===== リポジトリ設定（ここだけは固有値） =====
+const REPO_OWNER  = 'resuscitationproject-lgtm';
+const REPO_NAME   = 'digital-signage01';
+const REPO_BRANCH = 'main';
+const MEDIA_DIR   = 'media';
+
 const CONFIG = {
-  mode: 'sequential',      // 'sequential'(指定順) / 'shuffle'(お任せ) / 'weighted'(重み付き)
-  defaultDuration: 12,
+  mode: 'sequential',       // 'sequential' / 'shuffle' / 'weighted'
+  defaultDuration: 12,       // 画像の既定表示秒数
   fadeMs: 800,
   showClock: true,
   showBar: true,
-  reloadHours: 6,
-
-  playlist: [
-    { id:'ad01', type:'image', src:'media/ad01.jpg', duration:12, weight:1 },
-    { id:'promo', type:'video', src:'media/promo.mp4', weight:1 },
-    { id:'ad02', type:'image', src:'media/ad02.jpg', duration:12, weight:1 },
-    { id:'mpe',  type:'image', src:'media/mpe_intro.jpg', duration:10, weight:1 }
-  ]
+  reloadHours: 6,            // 定期リロード（このタイミングでmedia一覧も再取得）
 };
 
 const qs = new URLSearchParams(location.search);
@@ -103,17 +102,53 @@ if (qs.get('bar')   === '0') CONFIG.showBar   = false;
 const DEBUG = qs.get('debug') === '1';
 const SITE  = qs.get('site') || 'default';
 
-function inHours(spec){
-  if (!spec) return true;
-  const [s, e] = spec.split('-').map(Number);
-  const h = new Date().getHours();
-  return s <= e ? (h >= s && h < e) : (h >= s || h < e);
-}
-function activeList(){
-  const list = CONFIG.playlist.filter(it => inHours(it.hours));
-  return list.length ? list : CONFIG.playlist;
+/* ============================================================
+   media フォルダの自動取得（GitHub API）
+   ============================================================ */
+
+const API_URL = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${MEDIA_DIR}?ref=${REPO_BRANCH}`;
+const CACHE_KEY = 'signage_playlist_cache_v1';
+const IMG_EXT = /\.(jpe?g|png|gif|webp)$/i;
+const VID_EXT = /\.(mp4|webm)$/i;
+
+async function loadMediaFromRepo(){
+  try {
+    const res = await fetch(API_URL, { cache: 'no-store' });
+    if (!res.ok) throw new Error('GitHub API status ' + res.status);
+    const files = await res.json();
+
+    const list = files
+      .filter(f => f.type === 'file' && (IMG_EXT.test(f.name) || VID_EXT.test(f.name)))
+      .sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true }))
+      .map(f => ({
+        id: f.name.replace(/\.[^.]+$/, ''),
+        type: VID_EXT.test(f.name) ? 'video' : 'image',
+        src: `${MEDIA_DIR}/${f.name}`,
+        duration: CONFIG.defaultDuration,
+        weight: 1
+      }));
+
+    if (list.length === 0) throw new Error('media folder is empty');
+
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ list, savedAt: Date.now() }));
+    dbg(`fetched: ${list.length} files`);
+    return list;
+
+  } catch (err) {
+    dbg('fetch failed: ' + err.message + ' → using cache');
+    const cached = localStorage.getItem(CACHE_KEY);
+    if (cached) {
+      try { return JSON.parse(cached).list; } catch(e) {}
+    }
+    return null; // キャッシュも無い場合
+  }
 }
 
+/* ============================================================
+   再生順の構築
+   ============================================================ */
+
+let PLAYLIST = [];
 let queue = [], lastId = null;
 
 function shuffle(a){
@@ -125,14 +160,14 @@ function shuffle(a){
 }
 
 function buildQueue(){
-  const list = activeList();
-  if (CONFIG.mode === 'sequential') { queue = [...list]; return; }
+  if (!PLAYLIST.length) { queue = []; return; }
+  if (CONFIG.mode === 'sequential') { queue = [...PLAYLIST]; return; }
   if (CONFIG.mode === 'weighted') {
     const bag = [];
-    list.forEach(it => { const w = Math.max(1, it.weight || 1); for (let i=0;i<w;i++) bag.push(it); });
+    PLAYLIST.forEach(it => { const w = Math.max(1, it.weight || 1); for (let i=0;i<w;i++) bag.push(it); });
     queue = shuffle(bag);
   } else {
-    queue = shuffle([...list]);
+    queue = shuffle([...PLAYLIST]);
   }
   if (queue.length > 1 && lastId && queue[0].id === lastId) {
     [queue[0], queue[1]] = [queue[1], queue[0]];
@@ -141,10 +176,15 @@ function buildQueue(){
 
 function nextItem(){
   if (!queue.length) buildQueue();
+  if (!queue.length) return null;
   const it = queue.shift();
   lastId = it.id;
   return it;
 }
+
+/* ============================================================
+   再生処理
+   ============================================================ */
 
 const stage  = document.getElementById('stage');
 const bar    = document.getElementById('bar');
@@ -177,13 +217,21 @@ function runBar(ms){
 function play(){
   clearTimeout(timer);
   const item = nextItem();
+
+  if (!item) {
+    notice.querySelector('p').textContent = 'media フォルダに画像・動画を追加してください';
+    notice.classList.remove('hide');
+    timer = setTimeout(async () => { PLAYLIST = await loadMediaFromRepo() || []; buildQueue(); play(); }, 15000);
+    return;
+  }
+
   const el = makeEl(item);
   stage.appendChild(el);
 
   const fail = () => {
     errStreak++;
     dbg(`ERROR: ${item.src}`);
-    if (errStreak > activeList().length) { setTimeout(()=> location.reload(), 30000); return; }
+    if (errStreak > PLAYLIST.length) { timer = setTimeout(play, 5000); errStreak = 0; return; }
     timer = setTimeout(play, 1500);
   };
   el.onerror = fail;
@@ -209,8 +257,12 @@ function play(){
     timer = setTimeout(play, ms);
   }
 
-  dbg(`mode: ${CONFIG.mode}\nsite: ${SITE}\nnow : ${item.id} (${item.type})\nnext: ${queue.length ? queue[0].id : '(reshuffle)'}\nqueue: ${queue.length}`);
+  dbg(`mode: ${CONFIG.mode}\nsite: ${SITE}\nnow : ${item.id} (${item.type})\nnext: ${queue.length ? queue[0].id : '(reshuffle)'}\nqueue: ${queue.length}\ntotal: ${PLAYLIST.length}`);
 }
+
+/* ============================================================
+   時計・デバッグ・全画面誘導
+   ============================================================ */
 
 if (CONFIG.showClock) {
   const clock = document.getElementById('clock');
@@ -226,35 +278,31 @@ if (CONFIG.showClock) {
 
 const dbgEl = document.getElementById('dbg');
 if (DEBUG) dbgEl.classList.add('on');
-function dbg(t){ if (DEBUG) dbgEl.textContent = t; }
+function dbg(t){ if (DEBUG) dbgEl.textContent = t; console.log('[signage]', t); }
 
-setTimeout(()=> location.reload(), CONFIG.reloadHours * 3600 * 1000);
-
-let lastHour = new Date().getHours();
-setInterval(()=>{
-  const h = new Date().getHours();
-  if (h !== lastHour) { lastHour = h; queue = []; dbg('hour changed → rebuild'); }
-}, 60000);
-
-/* ---------- 全画面誘導バナー：全画面時は自動非表示 ---------- */
 function checkFullscreen(){
   const tip = document.getElementById('fstip');
-  if (document.fullscreenElement) {
-    tip.classList.add('hide');
-  } else {
-    tip.classList.remove('hide');
-  }
+  if (document.fullscreenElement) tip.classList.add('hide');
+  else tip.classList.remove('hide');
 }
 document.addEventListener('fullscreenchange', checkFullscreen);
 document.addEventListener('click', () => {
-  if (!document.fullscreenElement) {
-    document.documentElement.requestFullscreen().catch(()=>{});
-  }
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(()=>{});
 });
 setTimeout(checkFullscreen, 500);
-// 15秒経っても全画面でなければバナーを再表示し続ける（自動では消さない）
 
-setTimeout(play, 1200);
+/* 定期リロード：この時にmedia一覧も再取得される */
+setTimeout(()=> location.reload(), CONFIG.reloadHours * 3600 * 1000);
+
+/* ============================================================
+   起動
+   ============================================================ */
+
+(async function init(){
+  PLAYLIST = await loadMediaFromRepo() || [];
+  buildQueue();
+  setTimeout(play, 800);
+})();
 </script>
 </body>
 </html>
