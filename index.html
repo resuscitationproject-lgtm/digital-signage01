@@ -6,7 +6,7 @@
 <title>デジタルサイネージ</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; background:#000; overflow:hidden; }
+  html, body { width:100%; height:100%; background:#000; overflow:hidden; font-family:"Meiryo UI",sans-serif; }
 
   #stage { position:absolute; inset:0; }
   .item {
@@ -22,20 +22,22 @@
     font:600 26px/1 "Meiryo UI",sans-serif; color:#fff;
     text-shadow:0 2px 8px rgba(0,0,0,.85); z-index:20;
   }
-
+  #tenantBadge {
+    position:absolute; left:24px; bottom:20px;
+    font:600 14px/1 "Meiryo UI",sans-serif; color:rgba(255,255,255,.6);
+    z-index:20;
+  }
   #bar {
     position:absolute; left:0; bottom:0; height:4px;
     background:#FFB300; width:0; z-index:20;
     box-shadow:0 0 8px rgba(255,179,0,.6);
   }
-
   #notice {
     position:absolute; inset:0; z-index:30;
     display:flex; flex-direction:column;
     justify-content:center; align-items:center;
     background:linear-gradient(135deg,#1432AA 0%,#0E2480 100%);
-    color:#fff; font-family:"Meiryo UI",sans-serif;
-    transition:opacity .6s; text-align:center; padding:2rem;
+    color:#fff; transition:opacity .6s; text-align:center; padding:2rem;
   }
   #notice.hide { opacity:0; pointer-events:none; }
   #notice h1 { font-size:2rem; margin-bottom:.6rem; }
@@ -51,22 +53,73 @@
   #fstip.hide { opacity:0; transform:translateY(-100%); pointer-events:none; }
 
   #dbg {
-    position:absolute; left:16px; top:16px; z-index:25;
+    position:absolute; left:16px; top:16px; z-index:60;
     font:500 13px/1.6 monospace; color:#0f0;
     background:rgba(0,0,0,.65); padding:8px 12px; border-radius:6px;
     display:none; white-space:pre;
   }
   #dbg.on { display:block; }
+
+  #tenantScreen {
+    position:absolute; inset:0; z-index:100;
+    background:linear-gradient(135deg,#1432AA 0%,#0E2480 100%);
+    color:#fff; display:flex; flex-direction:column;
+    justify-content:center; align-items:center; padding:2rem;
+  }
+  #tenantScreen.hidden { display:none; }
+  #tenantScreen h1 { font-size:1.8rem; margin-bottom:.3rem; }
+  #tenantScreen .sub { color:#FFF6DE; font-size:.95rem; margin-bottom:2rem; }
+
+  #tenantList {
+    display:flex; flex-direction:column; gap:.8rem;
+    width:100%; max-width:420px; margin-bottom:1.5rem;
+  }
+  .tenant-btn {
+    background:rgba(255,255,255,.1);
+    border:1px solid rgba(255,255,255,.25);
+    color:#fff; font:600 16px/1 "Meiryo UI",sans-serif;
+    padding:16px; border-radius:10px; cursor:pointer;
+    transition:.2s;
+  }
+  .tenant-btn:hover, .tenant-btn:active { background:#FFB300; color:#1A1A1A; }
+  .tenant-btn.selected { background:#FFB300; color:#1A1A1A; }
+
+  #codeArea { display:none; flex-direction:column; align-items:center; width:100%; max-width:420px; }
+  #codeArea.show { display:flex; }
+  #codeInput {
+    width:100%; font-size:1.6rem; letter-spacing:.3rem; text-align:center;
+    padding:14px; border-radius:10px; border:none; margin-bottom:1rem;
+  }
+  #codeSubmit {
+    width:100%; padding:14px; border:none; border-radius:10px;
+    background:#FFB300; color:#1A1A1A; font:700 16px/1 "Meiryo UI",sans-serif;
+    cursor:pointer;
+  }
+  #codeSubmit:disabled { opacity:.5; cursor:default; }
+  #codeError { color:#ffb3b3; margin-top:.8rem; font-size:.9rem; min-height:1.2rem; }
+  #tenantLoading { color:#FFF6DE; }
 </style>
 </head>
 <body>
+
+<div id="tenantScreen">
+  <h1>光井企画工学事務所</h1>
+  <p class="sub">デジタルサイネージ — テナントを選択してください</p>
+  <div id="tenantLoading">読み込み中…</div>
+  <div id="tenantList"></div>
+  <div id="codeArea">
+    <input id="codeInput" type="tel" inputmode="numeric" placeholder="キーコードを入力" maxlength="10">
+    <button id="codeSubmit">起動する</button>
+    <div id="codeError"></div>
+  </div>
+</div>
 
 <div id="fstip">F11キーで全画面表示にしてください（フルスクリーン推奨）</div>
 <div id="stage"></div>
 <div id="bar"></div>
 <div id="clock"></div>
+<div id="tenantBadge"></div>
 <div id="dbg"></div>
-
 <div id="notice">
   <h1>光井企画工学事務所</h1>
   <p>デジタルサイネージを起動しています…</p>
@@ -74,24 +127,24 @@
 
 <script>
 /* ============================================================
-   超局所IoTデジタルサイネージ / ライトプラン
-   media フォルダ自動読み込み版
+   超局所IoTデジタルサイネージ / マルチテナント + Cloudflare認証版
    光井企画工学事務所
    ============================================================ */
 
-// ===== リポジトリ設定（ここだけは固有値） =====
 const REPO_OWNER  = 'resuscitationproject-lgtm';
 const REPO_NAME   = 'digital-signage01';
 const REPO_BRANCH = 'main';
-const MEDIA_DIR   = 'media';
+
+// ★ Cloudflare Worker発行後、実際のURLに差し替えてください
+const WORKER_URL = 'https://signage-auth.YOUR-SUBDOMAIN.workers.dev/verify';
 
 const CONFIG = {
-  mode: 'sequential',       // 'sequential' / 'shuffle' / 'weighted'
-  defaultDuration: 12,       // 画像の既定表示秒数
+  mode: 'sequential',
+  defaultDuration: 12,
   fadeMs: 800,
   showClock: true,
   showBar: true,
-  reloadHours: 6,            // 定期リロード（このタイミングでmedia一覧も再取得）
+  reloadHours: 6,
 };
 
 const qs = new URLSearchParams(location.search);
@@ -100,20 +153,131 @@ if (qs.has('duration')) CONFIG.defaultDuration = Number(qs.get('duration')) || C
 if (qs.get('clock') === '0') CONFIG.showClock = false;
 if (qs.get('bar')   === '0') CONFIG.showBar   = false;
 const DEBUG = qs.get('debug') === '1';
-const SITE  = qs.get('site') || 'default';
+const FORCE_SWITCH = qs.get('switch') === '1';
+
+const dbgEl = document.getElementById('dbg');
+if (DEBUG) dbgEl.classList.add('on');
+function dbg(t){ if (DEBUG) dbgEl.textContent = t; console.log('[signage]', t); }
 
 /* ============================================================
-   media フォルダの自動取得（GitHub API）
+   テナント管理
    ============================================================ */
 
-const API_URL = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${MEDIA_DIR}?ref=${REPO_BRANCH}`;
-const CACHE_KEY = 'signage_playlist_cache_v1';
+const STORE_KEY = 'signage_tenant_v1';
+const TENANTS_PUBLIC_URL = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/tenants_public.json`;
+
+function getSavedTenant(){
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch(e){ return null; }
+}
+function saveTenant(t){ localStorage.setItem(STORE_KEY, JSON.stringify(t)); }
+
+const tenantScreen  = document.getElementById('tenantScreen');
+const tenantLoading = document.getElementById('tenantLoading');
+const tenantList    = document.getElementById('tenantList');
+const codeArea      = document.getElementById('codeArea');
+const codeInput     = document.getElementById('codeInput');
+const codeSubmit    = document.getElementById('codeSubmit');
+const codeError     = document.getElementById('codeError');
+
+let TENANTS = [];
+let selectedTenant = null;
+
+async function fetchTenantsPublic(){
+  const res = await fetch(TENANTS_PUBLIC_URL, { cache: 'no-store' });
+  if (!res.ok) throw new Error('tenants_public.json fetch failed: ' + res.status);
+  return await res.json();
+}
+
+function renderTenantList(){
+  tenantLoading.style.display = 'none';
+  tenantList.innerHTML = '';
+  TENANTS.forEach(t => {
+    const btn = document.createElement('button');
+    btn.className = 'tenant-btn';
+    btn.textContent = t.name;
+    btn.onclick = () => selectTenant(t, btn);
+    tenantList.appendChild(btn);
+  });
+}
+
+function selectTenant(t, btnEl){
+  selectedTenant = t;
+  document.querySelectorAll('.tenant-btn').forEach(b => b.classList.remove('selected'));
+  btnEl.classList.add('selected');
+  codeArea.classList.add('show');
+  codeInput.value = '';
+  codeError.textContent = '';
+  codeInput.focus();
+}
+
+codeSubmit.onclick = tryUnlock;
+codeInput.addEventListener('keydown', e => { if (e.key === 'Enter') tryUnlock(); });
+
+async function tryUnlock(){
+  if (!selectedTenant) return;
+  codeSubmit.disabled = true;
+  codeError.textContent = '';
+
+  try {
+    const res = await fetch(WORKER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: codeInput.value.trim() })
+    });
+    const data = await res.json();
+
+    if (data.ok && data.tenant && data.tenant.id === selectedTenant.id) {
+      saveTenant(data.tenant);
+      tenantScreen.classList.add('hidden');
+      startPlayerForTenant(data.tenant.id, data.tenant.name);
+    } else if (data.ok && data.tenant) {
+      codeError.textContent = `そのコードは「${data.tenant.name}」用です`;
+    } else {
+      codeError.textContent = 'キーコードが正しくありません';
+    }
+  } catch (err) {
+    codeError.textContent = '通信エラーです。ネットワークを確認してください';
+    dbg('worker error: ' + err.message);
+  } finally {
+    codeSubmit.disabled = false;
+    codeInput.value = '';
+    codeInput.focus();
+  }
+}
+
+async function initTenantFlow(){
+  const saved = getSavedTenant();
+  if (saved && !FORCE_SWITCH) {
+    tenantScreen.classList.add('hidden');
+    startPlayerForTenant(saved.id, saved.name);
+    return;
+  }
+  try {
+    TENANTS = await fetchTenantsPublic();
+    renderTenantList();
+  } catch (err) {
+    tenantLoading.textContent = 'テナント一覧の取得に失敗しました。ネットワーク接続を確認してください。';
+    dbg('tenants_public.json error: ' + err.message);
+  }
+}
+
+/* ============================================================
+   media フォルダの自動取得（テナント別）
+   ============================================================ */
+
+const CACHE_KEY_PREFIX = 'signage_playlist_cache_v1_';
 const IMG_EXT = /\.(jpe?g|png|gif|webp)$/i;
 const VID_EXT = /\.(mp4|webm)$/i;
 
-async function loadMediaFromRepo(){
+async function loadMediaForTenant(tenantId){
+  const apiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/tenants/${tenantId}/media?ref=${REPO_BRANCH}`;
+  const cacheKey = CACHE_KEY_PREFIX + tenantId;
   try {
-    const res = await fetch(API_URL, { cache: 'no-store' });
+    const res = await fetch(apiUrl, { cache: 'no-store' });
     if (!res.ok) throw new Error('GitHub API status ' + res.status);
     const files = await res.json();
 
@@ -123,24 +287,21 @@ async function loadMediaFromRepo(){
       .map(f => ({
         id: f.name.replace(/\.[^.]+$/, ''),
         type: VID_EXT.test(f.name) ? 'video' : 'image',
-        src: `${MEDIA_DIR}/${f.name}`,
+        src: `tenants/${tenantId}/media/${f.name}`,
         duration: CONFIG.defaultDuration,
         weight: 1
       }));
 
     if (list.length === 0) throw new Error('media folder is empty');
-
-    localStorage.setItem(CACHE_KEY, JSON.stringify({ list, savedAt: Date.now() }));
-    dbg(`fetched: ${list.length} files`);
+    localStorage.setItem(cacheKey, JSON.stringify({ list, savedAt: Date.now() }));
+    dbg(`fetched: ${list.length} files for ${tenantId}`);
     return list;
 
   } catch (err) {
     dbg('fetch failed: ' + err.message + ' → using cache');
-    const cached = localStorage.getItem(CACHE_KEY);
-    if (cached) {
-      try { return JSON.parse(cached).list; } catch(e) {}
-    }
-    return null; // キャッシュも無い場合
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) { try { return JSON.parse(cached).list; } catch(e){} }
+    return null;
   }
 }
 
@@ -150,6 +311,7 @@ async function loadMediaFromRepo(){
 
 let PLAYLIST = [];
 let queue = [], lastId = null;
+let CURRENT_TENANT_ID = null;
 
 function shuffle(a){
   for (let i = a.length - 1; i > 0; i--) {
@@ -158,7 +320,6 @@ function shuffle(a){
   }
   return a;
 }
-
 function buildQueue(){
   if (!PLAYLIST.length) { queue = []; return; }
   if (CONFIG.mode === 'sequential') { queue = [...PLAYLIST]; return; }
@@ -173,7 +334,6 @@ function buildQueue(){
     [queue[0], queue[1]] = [queue[1], queue[0]];
   }
 }
-
 function nextItem(){
   if (!queue.length) buildQueue();
   if (!queue.length) return null;
@@ -194,26 +354,20 @@ let current = null, timer = null, barAnim = null, errStreak = 0;
 function makeEl(item){
   if (item.type === 'video') {
     const v = document.createElement('video');
-    v.className = 'item';
-    v.src = item.src;
-    v.muted = true;
-    v.playsInline = true;
-    v.preload = 'auto';
+    v.className = 'item'; v.src = item.src;
+    v.muted = true; v.playsInline = true; v.preload = 'auto';
     return v;
   }
   const img = document.createElement('img');
-  img.className = 'item';
-  img.src = item.src;
+  img.className = 'item'; img.src = item.src;
   return img;
 }
-
 function runBar(ms){
   if (!CONFIG.showBar) return;
   if (barAnim) barAnim.cancel();
   bar.style.width = '0';
   barAnim = bar.animate([{width:'0%'},{width:'100%'}], { duration: ms, easing:'linear', fill:'forwards' });
 }
-
 function play(){
   clearTimeout(timer);
   const item = nextItem();
@@ -221,7 +375,10 @@ function play(){
   if (!item) {
     notice.querySelector('p').textContent = 'media フォルダに画像・動画を追加してください';
     notice.classList.remove('hide');
-    timer = setTimeout(async () => { PLAYLIST = await loadMediaFromRepo() || []; buildQueue(); play(); }, 15000);
+    timer = setTimeout(async () => {
+      PLAYLIST = await loadMediaForTenant(CURRENT_TENANT_ID) || [];
+      buildQueue(); play();
+    }, 15000);
     return;
   }
 
@@ -237,14 +394,12 @@ function play(){
   el.onerror = fail;
 
   requestAnimationFrame(()=> el.classList.add('active'));
-
   const old = current;
   current = el;
   if (old) {
     old.classList.remove('active');
     setTimeout(()=>{ if (old.pause) old.pause(); old.remove(); }, CONFIG.fadeMs + 100);
   }
-
   notice.classList.add('hide');
 
   if (item.type === 'video') {
@@ -257,11 +412,11 @@ function play(){
     timer = setTimeout(play, ms);
   }
 
-  dbg(`mode: ${CONFIG.mode}\nsite: ${SITE}\nnow : ${item.id} (${item.type})\nnext: ${queue.length ? queue[0].id : '(reshuffle)'}\nqueue: ${queue.length}\ntotal: ${PLAYLIST.length}`);
+  dbg(`tenant: ${CURRENT_TENANT_ID}\nmode: ${CONFIG.mode}\nnow : ${item.id} (${item.type})\nnext: ${queue.length ? queue[0].id : '(reshuffle)'}\nqueue: ${queue.length}\ntotal: ${PLAYLIST.length}`);
 }
 
 /* ============================================================
-   時計・デバッグ・全画面誘導
+   時計・全画面誘導
    ============================================================ */
 
 if (CONFIG.showClock) {
@@ -276,10 +431,6 @@ if (CONFIG.showClock) {
   document.getElementById('clock').style.display = 'none';
 }
 
-const dbgEl = document.getElementById('dbg');
-if (DEBUG) dbgEl.classList.add('on');
-function dbg(t){ if (DEBUG) dbgEl.textContent = t; console.log('[signage]', t); }
-
 function checkFullscreen(){
   const tip = document.getElementById('fstip');
   if (document.fullscreenElement) tip.classList.add('hide');
@@ -287,22 +438,32 @@ function checkFullscreen(){
 }
 document.addEventListener('fullscreenchange', checkFullscreen);
 document.addEventListener('click', () => {
-  if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(()=>{});
+  if (!document.fullscreenElement && tenantScreen.classList.contains('hidden')) {
+    document.documentElement.requestFullscreen().catch(()=>{});
+  }
 });
 setTimeout(checkFullscreen, 500);
 
-/* 定期リロード：この時にmedia一覧も再取得される */
-setTimeout(()=> location.reload(), CONFIG.reloadHours * 3600 * 1000);
+/* ============================================================
+   テナント確定後のプレイヤー起動
+   ============================================================ */
+
+async function startPlayerForTenant(tenantId, tenantName){
+  CURRENT_TENANT_ID = tenantId;
+  document.getElementById('tenantBadge').textContent = tenantName || tenantId;
+
+  PLAYLIST = await loadMediaForTenant(tenantId) || [];
+  buildQueue();
+
+  setTimeout(()=> location.reload(), CONFIG.reloadHours * 3600 * 1000);
+  setTimeout(play, 800);
+}
 
 /* ============================================================
    起動
    ============================================================ */
 
-(async function init(){
-  PLAYLIST = await loadMediaFromRepo() || [];
-  buildQueue();
-  setTimeout(play, 800);
-})();
+initTenantFlow();
 </script>
 </body>
 </html>
