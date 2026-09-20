@@ -300,4 +300,114 @@ function makeEl(item){
   if (item.type === 'video') {
     const v = document.createElement('video');
     v.className = 'item'; v.src = item.src;
-    v.muted = true; v.playsInline = true; v.preload = 'auto';
+    v.muted = true; v.playsInline = true; v.preload = 'auto';    return v;
+  }
+  const img = document.createElement('img');
+  img.className = 'item'; img.src = item.src;
+  return img;
+}
+function runBar(ms){
+  if (!CONFIG.showBar) return;
+  if (barAnim) barAnim.cancel();
+  bar.style.width = '0';
+  barAnim = bar.animate([{width:'0%'},{width:'100%'}], { duration: ms, easing:'linear', fill:'forwards' });
+}
+function play(){
+  clearTimeout(timer);
+  const item = nextItem();
+
+  if (!item) {
+    notice.querySelector('p').textContent = 'media フォルダに画像・動画を追加してください';
+    notice.classList.remove('hide');
+    timer = setTimeout(async () => {
+      PLAYLIST = await loadMediaForTenant(CURRENT_TENANT_ID) || [];
+      buildQueue(); play();
+    }, 15000);
+    return;
+  }
+
+  const el = makeEl(item);
+  stage.appendChild(el);
+
+  const fail = () => {
+    errStreak++;
+    dbg(`ERROR: ${item.src}`);
+    if (errStreak > PLAYLIST.length) { timer = setTimeout(play, 5000); errStreak = 0; return; }
+    timer = setTimeout(play, 1500);
+  };
+  el.onerror = fail;
+
+  requestAnimationFrame(()=> el.classList.add('active'));
+  const old = current;
+  current = el;
+  if (old) {
+    old.classList.remove('active');
+    setTimeout(()=>{ if (old.pause) old.pause(); old.remove(); }, CONFIG.fadeMs + 100);
+  }
+  notice.classList.add('hide');
+
+  if (item.type === 'video') {
+    el.onloadedmetadata = () => runBar(el.duration * 1000);
+    el.onended = () => { errStreak = 0; play(); };
+    el.play().then(()=> { errStreak = 0; }).catch(fail);
+  } else {
+    const ms = (item.duration || CONFIG.defaultDuration) * 1000;
+    el.onload = () => { errStreak = 0; runBar(ms); };
+    timer = setTimeout(play, ms);
+  }
+
+  dbg(`tenant: ${CURRENT_TENANT_ID}\nmode: ${CONFIG.mode}\nnow : ${item.id} (${item.type})\nnext: ${queue.length ? queue[0].id : '(reshuffle)'}\nqueue: ${queue.length}\ntotal: ${PLAYLIST.length}`);
+}
+
+/* ============================================================
+   時計・全画面誘導
+   ============================================================ */
+
+if (CONFIG.showClock) {
+  const clock = document.getElementById('clock');
+  const tick = () => {
+    clock.textContent = new Date().toLocaleString('ja-JP', {
+      month:'numeric', day:'numeric', weekday:'short', hour:'2-digit', minute:'2-digit'
+    });
+  };
+  setInterval(tick, 1000); tick();
+} else {
+  document.getElementById('clock').style.display = 'none';
+}
+
+function checkFullscreen(){
+  const tip = document.getElementById('fstip');
+  if (document.fullscreenElement) tip.classList.add('hide');
+  else tip.classList.remove('hide');
+}
+document.addEventListener('fullscreenchange', checkFullscreen);
+document.addEventListener('click', () => {
+  if (!document.fullscreenElement && authScreen.classList.contains('hidden')) {
+    document.documentElement.requestFullscreen().catch(()=>{});
+  }
+});
+setTimeout(checkFullscreen, 500);
+
+/* ============================================================
+   テナント確定後のプレイヤー起動
+   ============================================================ */
+
+async function startPlayerForTenant(tenantId, label){
+  CURRENT_TENANT_ID = tenantId;
+  document.getElementById('tenantBadge').textContent = label || tenantId;
+
+  PLAYLIST = await loadMediaForTenant(tenantId) || [];
+  buildQueue();
+
+  setTimeout(()=> location.reload(), CONFIG.reloadHours * 3600 * 1000);
+  setTimeout(play, 800);
+}
+
+/* ============================================================
+   起動
+   ============================================================ */
+
+initAuthFlow();
+</script>
+</body>
+</html>
