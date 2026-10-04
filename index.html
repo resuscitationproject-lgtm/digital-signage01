@@ -3,10 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>超局所デジタルサイネージ｜光井企画工学事務所</title>
+<title>デジタルサイネージ</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body { width:100%; height:100%; background:#000; overflow:hidden; font-family:"Meiryo UI",sans-serif; }
+
+  .kiosk, .kiosk * { cursor:none !important; }
+  .kiosk #fstip { display:none !important; }
 
   #stage { position:absolute; inset:0; }
   .item {
@@ -60,7 +63,6 @@
   }
   #dbg.on { display:block; }
 
-  /* ===== キーコード入力画面（テナント一覧は表示しない） ===== */
   #authScreen {
     position:absolute; inset:0; z-index:100;
     background:linear-gradient(135deg,#1432AA 0%,#0E2480 100%);
@@ -87,7 +89,6 @@
 </head>
 <body>
 
-<!-- ===== キーコード入力のみ（テナント一覧は表示しない） ===== -->
 <div id="authScreen">
   <h1>光井企画工学事務所</h1>
   <p class="sub">超局所デジタルサイネージ<br>キーコードを入力してください</p>
@@ -98,7 +99,6 @@
   </div>
 </div>
 
-<!-- ===== プレイヤー画面 ===== -->
 <div id="fstip">F11キーで全画面表示にしてください（フルスクリーン推奨）</div>
 <div id="stage"></div>
 <div id="bar"></div>
@@ -112,7 +112,8 @@
 
 <script>
 /* ============================================================
-   超局所IoTデジタルサイネージ / マルチテナント(匿名コード認証)版
+   超局所IoTデジタルサイネージ
+   マルチテナント + キーコード認証 + 定休日/臨時休業の自動表示
    光井企画工学事務所
    ============================================================ */
 
@@ -120,8 +121,8 @@ const REPO_OWNER  = 'resuscitationproject-lgtm';
 const REPO_NAME   = 'digital-signage01';
 const REPO_BRANCH = 'main';
 
-// ★ Cloudflare Worker発行後、実際のURLに差し替えてください
-const WORKER_URL = 'https://signage-auth.mitsui-yasuhiro.workers.dev/verify';
+const WORKER_URL       = 'https://signage-auth.mitsui-yasuhiro.workers.dev/verify';
+const GAS_CALENDAR_URL = 'https://script.google.com/macros/s/AKfycbzSvViXjev7X_GkA_UQTATHpmzjZIHYQcxXInxo682Td8Dckf8HLehzw1xB6MItBdk/exec';
 
 const CONFIG = {
   mode: 'sequential',
@@ -139,13 +140,15 @@ if (qs.get('clock') === '0') CONFIG.showClock = false;
 if (qs.get('bar')   === '0') CONFIG.showBar   = false;
 const DEBUG = qs.get('debug') === '1';
 const FORCE_SWITCH = qs.get('switch') === '1';
+const KIOSK = qs.get('kiosk') === '1';
+if (KIOSK) document.documentElement.classList.add('kiosk');
 
 const dbgEl = document.getElementById('dbg');
 if (DEBUG) dbgEl.classList.add('on');
 function dbg(t){ if (DEBUG) dbgEl.textContent = t; console.log('[signage]', t); }
 
 /* ============================================================
-   認証（テナント一覧は一切表示しない）
+   認証（テナント一覧は表示しない）
    ============================================================ */
 
 const STORE_KEY = 'signage_tenant_v1';
@@ -154,7 +157,7 @@ function getSavedTenant(){
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (!raw) return null;
-    return JSON.parse(raw); // { id: "tenant01", label: "tenant01" }
+    return JSON.parse(raw);
   } catch(e){ return null; }
 }
 function saveTenant(t){ localStorage.setItem(STORE_KEY, JSON.stringify(t)); }
@@ -199,19 +202,57 @@ async function tryUnlock(){
   }
 }
 
-function initAuthFlow(){
+// ラズパイ用：?code=xxxxxx が付いているとき、通信できるまで再試行して自動認証
+async function autoUnlock(code){
+  while (true) {
+    try {
+      const res = await fetch(WORKER_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code })
+      });
+      const data = await res.json();
+      if (data.ok && data.tenant && data.tenant.id) {
+        const tenant = { id: data.tenant.id, label: data.tenant.label || data.tenant.id };
+        saveTenant(tenant);
+        authScreen.classList.add('hidden');
+        startPlayerForTenant(tenant.id, tenant.label);
+        return;
+      }
+      authScreen.classList.remove('hidden');
+      codeError.textContent = 'キーコードが正しくありません';
+      return;
+    } catch (e) {
+      dbg('auto auth retry: ' + e.message);
+      await new Promise(r => setTimeout(r, 15000));
+    }
+  }
+}
+
+async function initAuthFlow(){
   const saved = getSavedTenant();
   if (saved && !FORCE_SWITCH) {
     authScreen.classList.add('hidden');
     startPlayerForTenant(saved.id, saved.label);
     return;
   }
+
+  const autoCode = qs.get('code');
+  if (autoCode && !FORCE_SWITCH) {
+    authScreen.classList.add('hidden');
+    const u = new URL(location.href);
+    u.searchParams.delete('code');
+    history.replaceState(null, '', u.pathname + u.search);
+    await autoUnlock(autoCode);
+    return;
+  }
+
   authScreen.classList.remove('hidden');
   codeInput.focus();
 }
 
 /* ============================================================
-   media フォルダの自動取得（テナント別・匿名ID）
+   media フォルダの自動取得（テナント別）
    ============================================================ */
 
 const CACHE_KEY_PREFIX = 'signage_playlist_cache_v1_';
@@ -300,7 +341,8 @@ function makeEl(item){
   if (item.type === 'video') {
     const v = document.createElement('video');
     v.className = 'item'; v.src = item.src;
-    v.muted = true; v.playsInline = true; v.preload = 'auto';    return v;
+    v.muted = true; v.playsInline = true; v.preload = 'auto';
+    return v;
   }
   const img = document.createElement('img');
   img.className = 'item'; img.src = item.src;
@@ -320,7 +362,7 @@ function play(){
     notice.querySelector('p').textContent = 'media フォルダに画像・動画を追加してください';
     notice.classList.remove('hide');
     timer = setTimeout(async () => {
-      PLAYLIST = await loadMediaForTenant(CURRENT_TENANT_ID) || [];
+      PLAYLIST = await resolvePlaylist(CURRENT_TENANT_ID);
       buildQueue(); play();
     }, 15000);
     return;
@@ -356,7 +398,7 @@ function play(){
     timer = setTimeout(play, ms);
   }
 
-  dbg(`tenant: ${CURRENT_TENANT_ID}\nmode: ${CONFIG.mode}\nnow : ${item.id} (${item.type})\nnext: ${queue.length ? queue[0].id : '(reshuffle)'}\nqueue: ${queue.length}\ntotal: ${PLAYLIST.length}`);
+  dbg(`tenant: ${CURRENT_TENANT_ID}\nclosed: ${CLOSED_STATE || '-'}\nmode: ${CONFIG.mode}\nnow : ${item.id} (${item.type})\nnext: ${queue.length ? queue[0].id : '(reshuffle)'}\nqueue: ${queue.length}\ntotal: ${PLAYLIST.length}`);
 }
 
 /* ============================================================
@@ -376,6 +418,7 @@ if (CONFIG.showClock) {
 }
 
 function checkFullscreen(){
+  if (KIOSK) return;
   const tip = document.getElementById('fstip');
   if (document.fullscreenElement) tip.classList.add('hide');
   else tip.classList.remove('hide');
@@ -389,6 +432,62 @@ document.addEventListener('click', () => {
 setTimeout(checkFullscreen, 500);
 
 /* ============================================================
+   定休日・臨時休業の自動表示（Googleカレンダー連携 / GAS）
+   98番のファイル = 臨時休業 / 99番のファイル = 定休日
+   ============================================================ */
+
+function fetchJSONP(url, timeoutMs = 8000){
+  return new Promise((resolve, reject) => {
+    const cbName = 'jsonp_cb_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+    const script = document.createElement('script');
+    let tid = null;
+    const cleanup = () => { clearTimeout(tid); delete window[cbName]; script.remove(); };
+    tid = setTimeout(() => { cleanup(); reject(new Error('JSONP timeout')); }, timeoutMs);
+    window[cbName] = (data) => { cleanup(); resolve(data); };
+    script.onerror = () => { cleanup(); reject(new Error('JSONP load failed')); };
+    script.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cbName;
+    document.body.appendChild(script);
+  });
+}
+
+// 戻り値: '98' | '99' = 休業 / null = 営業日 / undefined = 確認失敗
+async function checkTodayClosed(tenantId){
+  try {
+    const data = await fetchJSONP(`${GAS_CALENDAR_URL}?tenantId=${encodeURIComponent(tenantId)}`);
+    return (data && data.closed) ? String(data.fileId) : null;
+  } catch (e) {
+    dbg('calendar check failed: ' + e.message);
+    return undefined;
+  }
+}
+
+// ファイル名の先頭が 98 / 99 のもの（98.jpg, 99_closed.jpg など）は休業専用
+function specialOf(id){
+  const m = String(id).match(/^(98|99)(?!\d)/);
+  return m ? m[1] : null;
+}
+
+let CLOSED_STATE = null;   // カレンダー上の状態: null=営業日 / '98' / '99'
+
+async function resolvePlaylist(tenantId){
+  const [closed, media] = await Promise.all([
+    checkTodayClosed(tenantId),
+    loadMediaForTenant(tenantId)
+  ]);
+  const all = media || [];
+  CLOSED_STATE = closed || null;
+
+  if (closed) {
+    const special = all.find(it => specialOf(it.id) === closed);
+    if (special) {
+      return [{ ...special, duration: CONFIG.reloadHours * 3600 }];
+    }
+    dbg(`休業(${closed})ですが ${closed} 番のファイルがありません → 通常再生`);
+  }
+  return all.filter(it => !specialOf(it.id));
+}
+
+/* ============================================================
    テナント確定後のプレイヤー起動
    ============================================================ */
 
@@ -396,12 +495,20 @@ async function startPlayerForTenant(tenantId, label){
   CURRENT_TENANT_ID = tenantId;
   document.getElementById('tenantBadge').textContent = label || tenantId;
 
-  PLAYLIST = await loadMediaForTenant(tenantId) || [];
+  PLAYLIST = await resolvePlaylist(tenantId);
   buildQueue();
 
   setTimeout(()=> location.reload(), CONFIG.reloadHours * 3600 * 1000);
   setTimeout(play, 800);
 }
+
+// 30分ごとにカレンダーを再確認し、状態が変わっていたら再読込
+setInterval(async () => {
+  if (!CURRENT_TENANT_ID) return;
+  const now = await checkTodayClosed(CURRENT_TENANT_ID);
+  if (now === undefined) return;
+  if ((now || null) !== CLOSED_STATE) location.reload();
+}, 30 * 60 * 1000);
 
 /* ============================================================
    起動
