@@ -372,6 +372,7 @@ function play(){
   stage.appendChild(el);
 
   const fail = () => {
+    clearTimeout(timer); 
     errStreak++;
     dbg(`ERROR: ${item.src}`);
     if (errStreak > PLAYLIST.length) { timer = setTimeout(play, 5000); errStreak = 0; return; }
@@ -389,7 +390,23 @@ function play(){
   notice.classList.add('hide');
 
   if (item.type === 'video') {
-    el.onloadedmetadata = () => runBar(el.duration * 1000);
+    let started = false;
+    el.addEventListener('playing', () => { started = true; errStreak = 0; });
+
+    el.onloadedmetadata = () => {
+      runBar(el.duration * 1000);
+      clearTimeout(timer);
+      timer = setTimeout(play, el.duration * 1000 + 5000);   // 終了の合図が来ない場合の保険
+    };
+    timer = setTimeout(play, 20000);                           // 読み込みが始まらない場合の保険
+
+    setTimeout(() => {                                          // 4秒たっても再生が始まらなければ飛ばす
+      if (!started && current === el) {
+        dbg('video not playing → skip: ' + item.src);
+        play();
+      }
+    }, 4000);
+
     el.onended = () => { errStreak = 0; play(); };
     el.play().then(()=> { errStreak = 0; }).catch(fail);
   } else {
